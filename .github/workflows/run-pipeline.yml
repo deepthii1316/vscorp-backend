@@ -1,0 +1,45 @@
+name: Run Medallion Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Durable processing run ID created by /api/process'
+        required: true
+        type: string
+
+jobs:
+  pipeline:
+    name: Run ETL Pipeline
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: medallion-pipeline
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: worker/pipeline/requirements.txt
+
+      - name: Install pipeline dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r worker/pipeline/requirements.txt
+
+      - name: Process claimed uploads and refresh reports
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          SUPABASE_DB_URL_POOLER: ${{ secrets.SUPABASE_DB_URL_POOLER }}
+          PROCESSING_RUN_ID: ${{ inputs.run_id }}
+        working-directory: worker/pipeline
+        run: |
+          python run_pipeline.py

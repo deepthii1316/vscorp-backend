@@ -1,0 +1,12 @@
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.env
+.env.*
+!.env.example
+credentials.json
+worker/pipeline/data/
+.DS_Store
+Thumbs.db
+*.log
