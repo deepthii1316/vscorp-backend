@@ -183,6 +183,24 @@ def _run_function(conn, name, run_id, error_message=None):
         )
 
 
+def _set_stage(run_id, stage):
+    """Report pipeline progress to the UI. Never lets a reporting problem
+    (e.g. migration not yet applied) abort the actual processing run."""
+    try:
+        conn = get_pg_conn()
+        try:
+            pg_update(
+                conn,
+                "UPDATE public.processing_runs "
+                "SET stage = %s, stage_updated_at = now() WHERE id = %s",
+                (stage, run_id),
+            )
+        finally:
+            conn.close()
+    except Exception as exc:
+        print(f"  (could not record stage '{stage}': {exc})")
+
+
 def run_processing_run(processing_run_id):
     """Process only the uploads atomically claimed for one durable run."""
     from ingest_file import (
@@ -219,6 +237,7 @@ def run_processing_run(processing_run_id):
         print("No uploads assigned to this processing run.")
         return
 
+    _set_stage(processing_run_id, "raw")
     print(f"Stage 1: ingesting {len(uploads)} claimed upload(s)")
     processed = []
     failures = []
@@ -268,12 +287,13 @@ def run_processing_run(processing_run_id):
             conn.close()
         raise RuntimeError(message)
 
-    for name, task in (
-        ("Stage 2: staging dimensions", build_dimensions),
-        ("Stage 3: staging stock facts", refresh_stock),
-        ("Stage 4a: gold dashboard", refresh_gold),
-        ("Stage 4b: Reebok metrics", refresh_reebok),
+    for name, stage, task in (
+        ("Stage 2: staging dimensions", "dimensions", build_dimensions),
+        ("Stage 3: staging stock facts", "facts", refresh_stock),
+        ("Stage 4a: gold dashboard", "gold", refresh_gold),
+        ("Stage 4b: Reebok metrics", "gold", refresh_reebok),
     ):
+        _set_stage(processing_run_id, stage)
         started = time.monotonic()
         print(f"--- {name} ---")
         try:
@@ -299,6 +319,7 @@ def run_processing_run(processing_run_id):
         _run_function(conn, "finish_processing_run", processing_run_id)
     finally:
         conn.close()
+    _set_stage(processing_run_id, "done")
     print("[OK] Processing run completed successfully.")
 
 
