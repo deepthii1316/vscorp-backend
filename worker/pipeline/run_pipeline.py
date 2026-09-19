@@ -12,7 +12,7 @@ for p in [pipeline_dir, scripts_dir]:
 from scripts.run_pipeline import run_processing_run
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run one claimed VS Corp processing job")
+    parser = argparse.ArgumentParser(description="Run one claimed Virata Retail processing job")
     parser.add_argument("--run-id", default=os.environ.get("PROCESSING_RUN_ID"))
     args = parser.parse_args()
     if not args.run_id:

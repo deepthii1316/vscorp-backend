@@ -1,4 +1,4 @@
--- Durable, idempotent processing for the VS Corp upload pipeline.
+-- Durable, idempotent processing for the Virata Retail upload pipeline.
 -- Apply through the Supabase SQL editor / migration runner before deploying
 -- the worker and frontend changes that use these objects.
 

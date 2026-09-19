@@ -451,7 +451,7 @@ CREATE INDEX IF NOT EXISTS idx_gold_pay_store ON gold.fact_master_dashboard_paym
 --   * NSV/RSV = SUM("Taxable Amount") (never MRP, never Value).
 --   * Ratios (SFR/AFR/ATV/UPT/ASP/FUPT) are recalculated at each level
 --     from summed numerators/denominators — never averaged.
---   * period_type in ('today','mtd') — one table for both views.
+--   * period_type in ('today','mtd','ytd') — one table for all views.
 --   * target is NULL unless derived from the approved ₹8L / weekday=15% /
 --     weekend=50% rules; if unknown, stay NULL (no reverse-engineering).
 --   * division_breakdown and staffwise are JSONB — these dimensions vary
@@ -460,7 +460,7 @@ CREATE INDEX IF NOT EXISTS idx_gold_pay_store ON gold.fact_master_dashboard_paym
 CREATE TABLE IF NOT EXISTS gold.reebok_daily_metrics (
     id                  bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     full_date           date        NOT NULL,
-    period_type         text        NOT NULL CHECK (period_type IN ('today', 'mtd')),
+    period_type         text        NOT NULL CHECK (period_type IN ('today', 'mtd', 'ytd')),
     -- Store identity
     store_name          text,
     site_short_name     text        NOT NULL,

@@ -5,8 +5,9 @@ Reads raw.sales for UPPAL REEBOK (Store Number = 'R1157'), aggregates
 every required KPI, and upserts into gold.reebok_daily_metrics.
 
 The gold table has one row per (full_date, period_type) where
-period_type in ('today', 'mtd'). This script populates BOTH for every
-date that has sales data, so all 4 reports can read from one table.
+period_type in ('today', 'mtd', 'ytd'). This script populates ALL THREE for
+every date that has sales data, so all 4 reports can read from one table.
+YTD = calendar year (1 January of that year through the row's date).
 
 Business rules (per artifacts/docs/REEBOOK_KPI_DEFINITIONS.md):
   * NSV / RSV = SUM("Taxable Amount")
@@ -17,7 +18,13 @@ Business rules (per artifacts/docs/REEBOOK_KPI_DEFINITIONS.md):
   * ASP = NSV / Qty
   * Footwear qty/nsv  = WHERE "Item Division" = 'FOOTWEAR'
   * Apparel qty/nsv   = WHERE "Item Division" = 'APPAREL'
-  * Accessories qty/nsv = everything else (NULL division or non-FW/APP)
+  * Accessories qty/nsv = Item Division 'ACCESSORIES' (socks, caps, bags)
+  * Blank Item Division: resolved from Class Name (CLASS_TO_DIVISION), never
+    defaulted to accessories. Unknown classes are reported and kept out of
+    the FW/APP/ACC buckets ('unclassified').
+  * 'Carry Bag' lines are free packaging (MRP Rs1, Rs0 taxable) and are NOT
+    units sold: they are excluded from every count (qty, division, gender,
+    salesperson). NSV and bills are unaffected (bags never create a bill).
   * Socks qty = WHERE "Class Name" ILIKE '%sock%'
   * Men/Women/Unisex  = from "Section" field (RB MEN / RB WOMEN / RB UNISEX)
   * Ratios always recomputed from summed numerators/denominators.
@@ -150,6 +157,44 @@ def normalize_section(section):
     return None
 
 
+# Packaging lines: free carry bags are not units sold (audit of Aug-2026 export:
+# 547 of 986 "units" were bags with Rs0 taxable amount).
+EXCLUDED_CLASSES = {"carry bag"}
+
+# Class Name -> division. Used ONLY when the export leaves Item Division blank.
+# Built from the Aug-2026 audit; add new classes here when the warning below fires.
+CLASS_TO_DIVISION = {
+    "shoes": "footwear", "slippers": "footwear", "slider": "footwear", "sandal": "footwear",
+    "t shirt": "apparel", "polo": "apparel", "track pant": "apparel", "rb training": "apparel",
+    "shorts": "apparel", "track top": "apparel", "pant": "apparel", "tank top": "apparel",
+    "rb athleisure": "apparel", "tights": "apparel", "gl hoodie": "apparel", "jogger": "apparel",
+    "socks": "accessories", "cap": "accessories", "bag": "accessories",
+}
+UNMAPPED_CLASSES = set()
+
+
+def is_excluded_line(class_name):
+    """True for packaging lines (carry bags) that must not count as units sold."""
+    return str(class_name or "").strip().lower() in EXCLUDED_CLASSES
+
+
+def resolve_division(div, class_name):
+    """
+    Division for a sales line. A filled Item Division wins; a blank one is resolved
+    from Class Name. Unknown blank-division classes are NOT defaulted to accessories:
+    they are recorded in UNMAPPED_CLASSES (reported at the end) and returned as
+    'unclassified'.
+    """
+    if div and str(div).strip():
+        return normalize_division(div)
+    key = str(class_name or "").strip().lower()
+    mapped = CLASS_TO_DIVISION.get(key)
+    if mapped:
+        return mapped
+    UNMAPPED_CLASSES.add(str(class_name or "(blank)"))
+    return "unclassified"
+
+
 def normalize_division(div):
     """
     Map raw 'Item Division' to footwear / apparel / accessories.
@@ -189,7 +234,7 @@ def fetch_reebok_rows(conn):
         (UPPAL_STORE,),
     )
     selected = select_authoritative_sales_rows(raw_rows)
-    return [
+    lines = [
         {
             "bill_date": row.get("Bill Date"),
             "bill_no": row.get("Bill No."),
@@ -202,6 +247,12 @@ def fetch_reebok_rows(conn):
         }
         for row in selected
     ]
+    kept = [ln for ln in lines if not is_excluded_line(ln["class_name"])]
+    skipped = lines and (len(lines) - len(kept))
+    if skipped:
+        bag_qty = sum(parse_num(ln["qty_raw"]) for ln in lines if is_excluded_line(ln["class_name"]))
+        print(f"  Excluded {skipped} packaging line(s) (Carry Bag, {bag_qty:g} units) from all counts.")
+    return kept
 
 
 def aggregate_one_date(rows_for_date):
@@ -239,7 +290,7 @@ def aggregate_one_date(rows_for_date):
         nsv += line_nsv
         qty += line_qty
 
-        div = normalize_division(r.get("item_division"))
+        div = resolve_division(r.get("item_division"), r.get("class_name"))
         sec = normalize_section(r.get("section"))
         cls = r.get("class_name")
         sm = str(r.get("salesman") or "Unknown").strip().upper()
@@ -251,9 +302,10 @@ def aggregate_one_date(rows_for_date):
         elif div == "apparel":
             app_qty += line_qty
             app_nsv += line_nsv
-        else:
+        elif div == "accessories":
             acc_qty += line_qty
             acc_nsv += line_nsv
+        # 'unclassified' lines stay in the totals but in no FW/APP/ACC bucket
 
         # Socks (any division, but Class Name like '%Sock%')
         if is_socks(cls):
@@ -287,8 +339,9 @@ def aggregate_one_date(rows_for_date):
         s["nsv"] += line_nsv
         if is_socks(cls):
             s["socks_qty"] = s.get("socks_qty", 0.0) + line_qty
-        s[f"{div}_qty"] += line_qty
-        s[f"{div}_nsv"] += line_nsv
+        if div in ("footwear", "apparel", "accessories"):
+            s[f"{div}_qty"] += line_qty
+            s[f"{div}_nsv"] += line_nsv
         staff_bills.setdefault(sm, set())
         if bill_no:
             staff_bills[sm].add(str(bill_no).strip())
@@ -390,6 +443,15 @@ def group_rows_by_date(all_rows):
     return out
 
 
+def rows_up_to_year(rows_by_date, target_date):
+    """Concat all rows where date <= target_date in the same calendar year (YTD)."""
+    out = []
+    for d, rs in rows_by_date.items():
+        if d.year == target_date.year and d <= target_date:
+            out.extend(rs)
+    return out
+
+
 def rows_up_to(rows_by_date, target_date):
     """Concat all rows where date <= target_date in the same month/year."""
     out = []
@@ -480,6 +542,13 @@ def refresh_reebok(verbose=True):
             target_date, "mtd", today_store_name, UPPAL_STORE, *mtd_metrics.values(),
         ))
 
+        # YTD row (rows from 1 January through target_date, calendar year)
+        ytd_rows = rows_up_to_year(rows_by_date, target_date)
+        ytd_metrics = aggregate_one_date(ytd_rows)
+        upserts.append((
+            target_date, "ytd", today_store_name, UPPAL_STORE, *ytd_metrics.values(),
+        ))
+
     if verbose:
         print(f"  Upserting {len(upserts)} rows into gold.reebok_daily_metrics...")
 
@@ -489,6 +558,10 @@ def refresh_reebok(verbose=True):
     cur.close()
 
     conn.close()
+    if UNMAPPED_CLASSES:
+        print("\n  [WARN] Blank Item Division with no mapping in CLASS_TO_DIVISION (kept out of FW/APP/ACC): "
+              + ", ".join(sorted(UNMAPPED_CLASSES)))
+        print("         Add them to CLASS_TO_DIVISION in refresh_reebok.py and re-run.")
     print(f"  [OK] gold.reebok_daily_metrics refreshed — {len(upserts)} rows.")
     print("\n[OK] Uppal Reebok gold refresh complete!")
 
