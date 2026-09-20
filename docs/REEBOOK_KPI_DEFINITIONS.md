@@ -10,30 +10,12 @@
 
 ## 1. Core Business Rules
 
-| Item | Definition |
-|---|---|
-| Store | Uppal Reebok |
-| Monthly Budget | ₹8,00,000 fixed for the entire month |
-| 1st Week | 25% of monthly target |
-| 2nd Week | 20% of monthly target |
-| 3rd Week | 20% of monthly target |
-| 4th Week | 15% of monthly target |
-| Weekend allocation | 50% |
-| Weekday allocation | 15% |
+
 | Sales Associates | Balraj Gaddam, Rambabu Dharavath, Erri Srija |
 | Final amount | Taxable Amount |
 | Primary sales basis | RSV — Retail Sale Value |
 
-### Target calculation status
 
-The existing **₹45,161** target seen in the report was Claude-generated. The exact base/calculation behind that value is currently unknown.
-
-Therefore:
-
-- Do **not** reverse-engineer or invent the ₹45,161 calculation.
-- Keep unknown target cells **NULL** for now.
-- Where a target must be calculated, use only the currently approved ₹8L monthly-budget assumptions above.
-- If the manager provides a new target formula later, update this source-of-truth document first, then update all dependent code.
 
 ---
 
@@ -43,7 +25,7 @@ Therefore:
 |---|---|---|---|
 | RSV | Retail Sale Value | `SUM(Taxable Amount)` | The retail sale value used as the primary sales basis for Uppal Reebok. |
 | NSV | Net Sales Value | `SUM(Taxable Amount)` | The final sales value used for achievement and KPI calculations. |
-| Target | Sales Target | `Target amount as defined by the approved target rules` | The sales amount that is expected to be achieved for the relevant period. |
+| Target | Sales Target | Daywise: `that month's target ÷ days in the month (28/29/30/31)`; the monthly target is ₹14,00,000 unless the month has its own (September 2026: ₹8,00,000). MTD: sum of the daywise targets from the 1st through the report date | The sales amount that is expected to be achieved for the relevant period. |
 | ACH% | Achievement Percentage | `(NSV Achieved / Target) × 100` | How much of the target has been achieved. |
 | Bills | Number of Bills | `SUM(Bills)` | Total number of bills/transactions made. |
 | Qty | Quantity Sold | `SUM(Qty Sold)` | Total number of units sold. |
@@ -56,9 +38,29 @@ Therefore:
 | FW | Footwear | Product section/category = `Footwear` | Footwear products sold. |
 | APP | Apparel | Product section/category = `Apparel` | Apparel products sold. |
 | ACC | Accessories | Product section/category = `Accessories` | Accessories products sold. |
+| YTD | Year Till Date | `From 1 January through report date` | Cumulative result for the calendar year, computed by the pipeline from raw sales (`ytd` row in `gold.reebok_daily_metrics`). Target = ₹14,00,000 × completed months since 1 Jan + current MTD target. |
 | MTD | Month Till Date | `From 1st of month through report date` | The cumulative result from the beginning of the month up to the report date. |
 | WTD | Week Till Date | `From start of week through report date` | Week-to-date value, if/when implemented. |
-| % Mix | Percentage Mix | `Category Qty / Total relevant Qty × 100` | The proportion of a category within the relevant total. |
+| MD % | Markdown Percentage | `(MRP - NSV) / MRP x 100`, MRP = SUM(MRP x Qty) | How far below MRP the sales were made (decided 20-Sep-2026). Note: MRP includes GST and NSV does not, so this reads higher than a GST-inclusive comparison. |
+| % Mix | Percentage Mix | `Category NSV / Total relevant NSV × 100` | The proportion of a category within the relevant total (NSV basis). |
+| % within Gender | Division share within a gender | `Division MTD NSV / that Gender's total MTD NSV × 100` | Division split inside Men / Women / Unisex. |
+
+---
+
+## 2a. Units Sold — Data Rules
+
+Verified against the raw SAP export (Aug-2026 audit).
+
+- **Carry Bag lines are not units sold.** Lines with Class Name = `Carry Bag` are free packaging
+  (MRP ₹1, 100% discount, ₹0 taxable amount, Section `RB UNISEX`, blank Item Division). They are
+  excluded from Qty, division, gender and salesperson counts. NSV and Bills are unaffected
+  (a bag never creates a bill). Do not confuse with Class Name `Bag`, which is real Accessories merchandise.
+- **Blank Item Division is never defaulted to Accessories.** A blank division is resolved from Class Name
+  using the `CLASS_TO_DIVISION` lookup in `refresh_reebok.py` (T Shirt, Shorts, GL HOODIE, Jogger → Apparel, etc.).
+  Unknown classes are reported by the refresh job and kept out of the FW/APP/ACC buckets until mapped.
+- **Similar-looking lines are separate units.** Two rows with the same Bill No., Class Name, Qty and
+  Taxable Amount are different items (different stock numbers/sizes). Do not de-duplicate on those fields.
+- **Returns** are negative rows inside exchange bills; keep them netted against sales.
 
 ---
 
@@ -100,11 +102,36 @@ ACH% = (60,000 / 1,00,000) × 100
 
 Achievement percentage must use the report's **NSV Achieved** and the applicable **Target**.
 
+### Target rule
+
+```text
+Monthly Target   = ₹14,00,000 by default; a month can have its own target (see the table below)
+Daywise Target   = that month's Monthly Target ÷ days in that month
+MTD Target       = Daywise Target × day-of-month  (sum of daywise targets 1st → report date)
+```
+
+Monthly targets in force:
+
+| Month | Monthly target |
+|---|---|
+| Every month unless listed | ₹14,00,000 |
+| September 2026 | ₹8,00,000 |
+
+Example (August, 31 days): Daywise Target = 14,00,000 ÷ 31 = ₹45,161; MTD Target on 3-Aug = ₹1,35,484.
+Example (September, 30 days): Daywise Target = 8,00,000 ÷ 30 = ₹26,667; MTD Target on 17-Sep = ₹4,53,333.
+YTD Target = each completed month's own target since 1 January + the current MTD target.
+To change a month's target, edit `MONTHLY_TARGET_OVERRIDES` in `src/lib/email/reebokHelpers.js` (one line per month).
+The daywise value is not rounded in calculations (rounding is display-only) so MTD sums stay exact.
+Canonical implementation: `calcTarget`, `MTD_TARGET`, `calcAchievement` in `src/lib/email/reebokHelpers.js`.
+
 ### Color coding
 
-Achievement % should use the agreed report color coding consistently across HTML/email and Excel outputs.
+Achievement % is the only value that is color coded, and it is coloured **relatively** (decided 21-Sep-2026), the same way in the on-screen report, the email images and the Excel download:
 
-The exact color thresholds should be added here once confirmed by the manager. Until then, code must not invent threshold values.
+- Within each comparison group the **lowest** value is **red**, the **highest** is **green**, and values in between are blended through yellow (the standard red-yellow-green color scale). There are no fixed percentage cut-offs.
+- Comparison groups: the ACH% column of the salespeople in each Staffwise KPI table (the STORE TOTAL is placed on the same scale), and the three Achievement % cells (Daywise, MTD, YTD) of the first table.
+- If every value in a group is the same there is nothing to rank, so they all get the middle (yellow) color.
+- Colors are computed in one place (`heatColor` and `applyRelativeHeat` in `src/lib/email/reebokReportModel.js`).
 
 ---
 
@@ -226,19 +253,19 @@ Gender mix is calculated as:
 
 ```text
 Men % Mix =
-Men Qty / (Men Qty + Women Qty + Unisex Qty) × 100
+Men NSV / (Men NSV + Women NSV + Unisex NSV) × 100
 ```
 
 Similarly:
 
 ```text
 Women % Mix =
-Women Qty / (Men Qty + Women Qty + Unisex Qty) × 100
+Women NSV / (Men NSV + Women NSV + Unisex NSV) × 100
 ```
 
 ```text
 Unisex % Mix =
-Unisex Qty / (Men Qty + Women Qty + Unisex Qty) × 100
+Unisex NSV / (Men NSV + Women NSV + Unisex NSV) × 100
 ```
 
 Repeat the same calculation for:
@@ -351,7 +378,7 @@ Do not:
 - Copy a value from another report
 - Use a fabricated default
 
-The existing ₹45,161 target is specifically an example of a value whose derivation is currently unknown.
+The ₹45,161 daywise target is now derived by the Target rule in section 4 (₹14,00,000 ÷ 31).
 
 ---
 
@@ -374,3 +401,12 @@ All calculations should flow through the canonical KPI/metrics definitions so th
 | 05-Sep-2026 | Weekday/weekend allocation added | Weekday = 15%, Weekend = 50% |
 | 05-Sep-2026 | Taxable Amount established as final amount | NSV/RSV calculations use Taxable Amount |
 | 05-Sep-2026 | Staffwise rules added | Exact 3 associates and staffwise product calculations |
+| 19-Sep-2026 | Target rule replaced: ₹14L/month ÷ days in month; MTD = sum of daywise targets | Supersedes the ₹8L / weekday-weekend assumption; ACH% now computed for Daywise and MTD |
+| 19-Sep-2026 | % Mix and % within Gender now NSV-based; SFR/AFR displayed as %; per-staff Target = store target ÷ 3; store-total rows added | Sales report tables and Excel follow public/SALES-REPORT-LAYOUT.md via src/lib/email/reebokReportModel.js |
+| 19-Sep-2026 | YTD column added (calendar year, derived from gold MTD rows) | Daywise + MTD + YTD table and Excel show YTD NSV, Target, ACH%, Bills, Qty |
+| 19-Sep-2026 | YTD is now computed in the pipeline (new `ytd` period_type) instead of summing MTD rows | Migration 2026_09_19_reebok_ytd.sql + refresh_reebok.py; YTD target = ₹14L × completed months + MTD target |
+| 19-Sep-2026 | Carry Bag lines excluded from unit counts; blank Item Division resolved from Class Name (no default to Accessories) | Fixes inflated Qty (120→66), Accessories and Unisex; refresh_reebok.py must be re-run |
+| 20-Sep-2026 | MD % defined as (MRP - NSV) / MRP; master dashboard tables added (gold.reebok_master_dashboard, gold.reebok_master_dashboard_payments); Account DSR loader maps the real Reebok headers | Migration 2026_09_20_reebok_master_dashboard.sql; DSR files must be re-uploaded |
+| 20-Sep-2026 | Monthly target is now per month: default ₹14,00,000, September 2026 = ₹8,00,000 | Daywise, MTD and YTD targets and ACH% in the sales report, Excel and (later) the dashboard follow the month's own target |
+| 20-Sep-2026 | YTD confirmed as the calendar year, 1 January to the report date | No change to the calculation; YTD target counts every month since 1 January at its own target |
+| 21-Sep-2026 | ACH% color coding changed from fixed thresholds (80 / 60) to relative coloring (lowest red, highest green) | Sales report tables, email images and Excel |
