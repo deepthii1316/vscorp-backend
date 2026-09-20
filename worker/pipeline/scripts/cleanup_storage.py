@@ -1,18 +1,19 @@
 """
-cleanup_storage.py - remove the Reebok SALES and ACCOUNT DSR files from the retail-ops bucket
-=============================================================================================
-Step 3 of 3 of the data cleanup (see database/maintenance/2026_09_21_cleanup_*.sql).
+cleanup_storage.py - empty upload folders in the retail-ops bucket (sales + Account DSR, or inventory)
+=====================================================================================================
+Step 3 of 3 of the data cleanups (see database/maintenance/2026_09_21_*cleanup_*.sql).
 
-Only these folders are touched:
-    raw/sales
-    raw/account-dsr
-The inventory folder (raw/inventory) is deliberately left alone. The bucket and its folders stay.
+What it touches depends on --target:
+    --target reebok      (default)  raw/sales and raw/account-dsr      (inventory is left alone)
+    --target inventory              raw/inventory                      (sales and DSR are left alone)
+The bucket and its folders always stay.
 
 Safe by default: without --execute it only LISTS what it would delete.
 
 Usage (from worker/pipeline, with the venv python):
-    .\\.venv\\Scripts\\python.exe scripts\\cleanup_storage.py              # list only
-    .\\.venv\\Scripts\\python.exe scripts\\cleanup_storage.py --execute    # delete (asks you to type DELETE)
+    .\\.venv\\Scripts\\python.exe scripts\\cleanup_storage.py                              # list only (sales + DSR)
+    .\\.venv\\Scripts\\python.exe scripts\\cleanup_storage.py --target inventory           # list only (inventory)
+    .\\.venv\\Scripts\\python.exe scripts\\cleanup_storage.py --target inventory --execute # delete (asks you to type DELETE)
 
 Reads NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY from worker/pipeline/.env.
 If your antivirus or proxy breaks HTTPS for Python ("certificate verify failed"), run
@@ -45,8 +46,10 @@ if hasattr(sys.stdout, "reconfigure"):
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 BUCKET = "retail-ops"
-DELETE_FOLDERS = ["raw/sales", "raw/account-dsr"]
-KEEP_FOLDERS = ["raw/inventory"]          # listed for information only
+TARGETS = {
+    "reebok":    {"delete": ["raw/sales", "raw/account-dsr"], "keep": ["raw/inventory"]},
+    "inventory": {"delete": ["raw/inventory"],                "keep": ["raw/sales", "raw/account-dsr"]},
+}
 
 URL = (os.environ.get("NEXT_PUBLIC_SUPABASE_URL") or "").rstrip("/")
 KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or ""
@@ -89,7 +92,9 @@ def delete_files(paths):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--execute", action="store_true", help="actually delete (default: list only)")
+    ap.add_argument("--target", choices=sorted(TARGETS), default="reebok", help="which folders to empty (default: reebok = sales + account-dsr)")
     args = ap.parse_args()
+    DELETE_FOLDERS, KEEP_FOLDERS = TARGETS[args.target]["delete"], TARGETS[args.target]["keep"]
 
     to_delete = []
     for folder in DELETE_FOLDERS:

@@ -11,6 +11,7 @@ Functions called by run_pipeline.py:
 """
 
 import os
+import re
 import sys
 import io
 import pandas as pd
@@ -372,11 +373,19 @@ def ingest_inventory_file(filepath, pg_conn, uploaded_by="admin", upload_audit_i
                             return s
         return None
 
+    # The stock report ends with a summary line ("Grand Total:") that carries the label in the Bar Code
+    # column and the store's total quantity/value. It must never be stored as a product.
+    total_label = re.compile(r"^\s*(grand\s+|sub\s*)?total\s*:?\s*$", re.IGNORECASE)
+    total_lines = 0
+
     rows = []
     for source_row_number, (_, r) in enumerate(df.iterrows(), start=1):
         item = gv(r, ["Product Name", "Item Description", "Description"])
         barcode = gv(r, ["Bar Code", "Barcode", "Style Code", "EAN", "Stock No."])
         sap = gv(r, ["SAPCODE", "SAP Code", "SAP CODE"])
+        if any(total_label.match(x or "") for x in (item, barcode, sap)):
+            total_lines += 1
+            continue
         if item or barcode or sap:
             rows.append((
                 gv(r, ["Store Code", "Store Number", "Site Code", "Store"]) or "R1157",
@@ -399,6 +408,8 @@ def ingest_inventory_file(filepath, pg_conn, uploaded_by="admin", upload_audit_i
                 source_row_number,
             ))
 
+    if total_lines:
+        print(f"  Skipped {total_lines} total/summary line(s) (e.g. 'Grand Total:').")
     if not rows:
         print("  No valid inventory records found.")
         return 0
