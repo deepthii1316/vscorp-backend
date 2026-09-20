@@ -209,52 +209,106 @@ def ingest_sales_file(filepath, pg_conn, uploaded_by="admin", upload_audit_id=No
 
 # ── account_dsr ───────────────────────────────────────────────────────────────
 
+def _dsr_norm(col):
+    """Normalise a DSR header: lower-case, single spaces."""
+    return " ".join(str(col).strip().lower().split())
+
+
+def _dsr_num(val):
+    """DSR cells use '-' for zero and may contain thousands separators."""
+    if val is None:
+        return 0.0
+    s = str(val).strip().replace(",", "")
+    if s in ("", "-", "nan", "none", "null", "n/a"):
+        return 0.0
+    try:
+        return float(s)
+    except ValueError:
+        return 0.0
+
+
+def _dsr_num_str(val):
+    n = _dsr_num(val)
+    return str(int(n)) if n == int(n) else str(round(n, 2))
+
+
 def ingest_account_dsr_file(filepath, pg_conn, uploaded_by="admin", upload_audit_id=None):
-    """Insert account DSR rows into raw.account_dsr. Returns row count."""
+    """
+    Insert Reebok Account DSR rows into raw.account_dsr. Returns row count.
+
+    The DSR has one row per day with these headers (matched exactly, case-insensitive):
+      Store name, Date, UPI, CARD, AMEX, ZOMATO, GV, CASH, SYSTEM DAY SALE, PHYSICAL DAY SALE,
+      Diff, CN Issued, CN Redeem, CASH USED, PAYTM CARD, PAYTM, Remarks for Excess / Shortage
+    Rows whose Date is not a real date (for example the "Opening Cash" line) are skipped.
+    """
     print(f"Ingesting account_dsr file: {os.path.basename(filepath)}")
     df = read_excel_auto(filepath)
 
     now_str = datetime.now(timezone.utc).isoformat()
     renamed_name = os.path.basename(filepath)
+    norm_cols = {_dsr_norm(c): c for c in df.columns}
 
-    def gv(r, keys):
-        for k in keys:
-            for col in r.index:
-                if str(col).strip().lower() == k.lower() or k.lower() in str(col).strip().lower():
-                    v = r[col]
-                    if v is not None:
-                        s = str(v).strip()
-                        if s and s.lower() not in ("nan", "none", "null", ""):
-                            return s
-        return None
+    def cell(r, header):
+        col = norm_cols.get(header)
+        if col is None:
+            return None
+        v = r[col]
+        if v is None:
+            return None
+        s = str(v).strip()
+        return None if s.lower() in ("", "nan", "none", "null") else s
+
+    missing = [h for h in ("date", "store name", "upi", "card", "cash", "physical day sale") if h not in norm_cols]
+    if missing:
+        raise ValueError(f"Account DSR is missing expected column(s): {', '.join(missing)}. Found: {', '.join(df.columns)}")
 
     rows = []
+    skipped = 0
     for source_row_number, (_, r) in enumerate(df.iterrows(), start=1):
-        date = gv(r, ["Date", "Bill Date", "Trans Date", "Transaction Date"])
-        store = gv(r, ["Store Number", "Store Code", "Site Code", "Store Name", "Site Name", "Store"])
-        if date and store:
-            rows.append((
-                date,
-                store,
-                gv(r, ["Store Name", "Site Name"]),
-                gv(r, ["Total Bills", "Bills Count", "Bills"]) or "1",
-                gv(r, ["Total Sales", "Physical Day Sale", "Total Amount", "Value", "Net Amount", "Collection"]) or "0",
-                gv(r, ["Cash Amount", "Cash System Day Sale", "Cash", "Cash Sale"]) or "0",
-                gv(r, ["Cash Bills"]) or "0",
-                gv(r, ["Total Card Sales", "Card Amount", "Card", "Credit Card", "Debit Card", "POS"]) or "0",
-                gv(r, ["Card Bills"]) or "0",
-                gv(r, ["UPI Amount", "UPI", "QR", "GPay", "PhonePe", "Paytm", "Razorpay"]) or "0",
-                gv(r, ["UPI Bills"]) or "0",
-                gv(r, ["Other Amount", "Other", "Voucher", "Wallet"]) or "0",
-                gv(r, ["Other Bills"]) or "0",
-                now_str,
-                uploaded_by,
-                renamed_name,
-                "manual",
-                upload_audit_id,
-                source_row_number,
-            ))
+        date = cell(r, "date")
+        store = cell(r, "store name")
+        if not date or not store or pd.isna(pd.to_datetime(date, errors="coerce")):
+            skipped += 1
+            continue
 
+        upi, card, cash = _dsr_num(cell(r, "upi")), _dsr_num(cell(r, "card")), _dsr_num(cell(r, "cash"))
+        amex, zomato, gvv = _dsr_num(cell(r, "amex")), _dsr_num(cell(r, "zomato")), _dsr_num(cell(r, "gv"))
+        rows.append((
+            date,
+            store,
+            store,
+            "0",                                        # Total Bills (not in the DSR)
+            _dsr_num_str(cell(r, "physical day sale")), # Total Sales = PHYSICAL DAY SALE
+            _dsr_num_str(cash),
+            "0",
+            _dsr_num_str(card),
+            "0",
+            _dsr_num_str(upi),
+            "0",
+            _dsr_num_str(amex + zomato + gvv),          # Other Amount = AMEX + ZOMATO + GV
+            "0",
+            _dsr_num_str(amex),
+            _dsr_num_str(zomato),
+            _dsr_num_str(gvv),
+            _dsr_num_str(cell(r, "system day sale")),
+            _dsr_num_str(cell(r, "physical day sale")),
+            _dsr_num_str(cell(r, "diff")),
+            _dsr_num_str(cell(r, "cn issued")),
+            _dsr_num_str(cell(r, "cn redeem")),
+            _dsr_num_str(cell(r, "cash used")),
+            _dsr_num_str(cell(r, "paytm")),
+            _dsr_num_str(cell(r, "paytm card")),
+            cell(r, "remarks for excess / shortage"),
+            now_str,
+            uploaded_by,
+            renamed_name,
+            "manual",
+            upload_audit_id,
+            source_row_number,
+        ))
+
+    if skipped:
+        print(f"  Skipped {skipped} non-data row(s) (no valid date, e.g. 'Opening Cash').")
     if not rows:
         print("  No valid Account DSR records found.")
         return 0
@@ -263,6 +317,8 @@ def ingest_account_dsr_file(filepath, pg_conn, uploaded_by="admin", upload_audit
         "Date", "Store Number", "Store Name", "Total Bills", "Total Sales",
         "Cash Amount", "Cash Bills", "Card Amount", "Card Bills",
         "UPI Amount", "UPI Bills", "Other Amount", "Other Bills",
+        "AMEX Amount", "Zomato Amount", "GV Amount", "System Day Sale", "Physical Day Sale",
+        "Diff", "CN Issued", "CN Redeem", "Cash Used", "Paytm Amount", "Paytm Card Amount", "Remarks",
         "uploaded_at", "uploaded_by", "source_file_name", "ingestion_method",
         "upload_audit_id", "source_row_number"
     )

@@ -244,6 +244,10 @@ def fetch_reebok_rows(conn):
             "section": row.get("Section"),
             "class_name": row.get("Class Name"),
             "salesman": row.get("Salesman"),
+            "mrp_raw": row.get("MRP"),
+            "cgst_raw": row.get("CGST"),
+            "sgst_raw": row.get("SGST"),
+            "igst_raw": row.get("IGST"),
         }
         for row in selected
     ]
@@ -509,6 +513,178 @@ ON CONFLICT (full_date, period_type) DO UPDATE SET
 """
 
 
+# ── Master dashboard tables (Overview tab) ───────────────────────────────────
+#
+# gold.reebok_master_dashboard           one row per day, built from the SAME cleaned lines as
+#                                        gold.reebok_daily_metrics (carry bags excluded, blank
+#                                        divisions resolved), so both always agree.
+# gold.reebok_master_dashboard_payments  one row per day from the Account DSR, de-duplicated.
+#
+# MD % = (mrp_value - nsv) / mrp_value x 100   (decided 20-Sep-2026, see KPI definitions)
+
+MASTER_COLUMNS = [
+    "nsv", "gst_amount", "gross_value", "mrp_value", "qty", "bills",
+    "footwear_qty", "footwear_nsv", "footwear_mrp", "footwear_bills",
+    "apparel_qty", "apparel_nsv", "apparel_mrp", "apparel_bills",
+    "accessories_qty", "accessories_nsv", "accessories_mrp", "accessories_bills",
+    "socks_qty", "shoes_qty",
+]
+MASTER_DIVISIONS = ("footwear", "apparel", "accessories")
+
+
+def aggregate_master_day(rows_for_date):
+    """One day of cleaned sales lines -> dict of MASTER_COLUMNS."""
+    t = dict.fromkeys(MASTER_COLUMNS, 0.0)
+    bills = set()
+    div_bills = {d: set() for d in MASTER_DIVISIONS}
+
+    for r in rows_for_date:
+        qty = parse_num(r.get("qty_raw"))
+        nsv = parse_num(r.get("tax_raw"))
+        gst = parse_num(r.get("cgst_raw")) + parse_num(r.get("sgst_raw")) + parse_num(r.get("igst_raw"))
+        mrp = parse_num(r.get("mrp_raw")) * qty
+        bill = str(r.get("bill_no") or "").strip()
+        cls = str(r.get("class_name") or "").strip().lower()
+        div = resolve_division(r.get("item_division"), r.get("class_name"))
+
+        t["nsv"] += nsv
+        t["gst_amount"] += gst
+        t["gross_value"] += nsv + gst
+        t["mrp_value"] += mrp
+        t["qty"] += qty
+        if bill:
+            bills.add(bill)
+
+        if div in MASTER_DIVISIONS:
+            t[f"{div}_qty"] += qty
+            t[f"{div}_nsv"] += nsv
+            t[f"{div}_mrp"] += mrp
+            if bill:
+                div_bills[div].add(bill)
+        if is_socks(r.get("class_name")):
+            t["socks_qty"] += qty
+        if cls == "shoes":          # closed footwear, the denominator of SSR
+            t["shoes_qty"] += qty
+
+    out = {k: round(v, 2) for k, v in t.items()}
+    out["bills"] = len(bills)
+    for d in MASTER_DIVISIONS:
+        out[f"{d}_bills"] = len(div_bills[d])
+    return out
+
+
+def build_master_rows(rows_by_date):
+    """-> list of (full_date, site_short_name, *MASTER_COLUMNS values)"""
+    result = []
+    for d in sorted(rows_by_date.keys()):
+        m = aggregate_master_day(rows_by_date[d])
+        result.append((d, UPPAL_STORE, *[m[c] for c in MASTER_COLUMNS]))
+    return result
+
+
+MASTER_UPSERT_SQL = (
+    "INSERT INTO gold.reebok_master_dashboard (full_date, site_short_name, " + ", ".join(MASTER_COLUMNS) + ") VALUES %s "
+    "ON CONFLICT (full_date) DO UPDATE SET site_short_name = EXCLUDED.site_short_name, "
+    + ", ".join(f"{c} = EXCLUDED.{c}" for c in MASTER_COLUMNS) + ", loaded_at = now()"
+)
+
+PAYMENT_UPSERT_SQL = """
+INSERT INTO gold.reebok_master_dashboard_payments (
+    full_date, site_short_name, upi_amount, card_amount, amex_amount, zomato_amount, gv_amount, cash_amount,
+    total_collected, dsr_day_sale, cash_used, cn_issued, cn_redeem, remarks, source_file
+) VALUES %s
+ON CONFLICT (full_date) DO UPDATE SET
+    site_short_name = EXCLUDED.site_short_name,
+    upi_amount = EXCLUDED.upi_amount, card_amount = EXCLUDED.card_amount, amex_amount = EXCLUDED.amex_amount,
+    zomato_amount = EXCLUDED.zomato_amount, gv_amount = EXCLUDED.gv_amount, cash_amount = EXCLUDED.cash_amount,
+    total_collected = EXCLUDED.total_collected, dsr_day_sale = EXCLUDED.dsr_day_sale,
+    cash_used = EXCLUDED.cash_used, cn_issued = EXCLUDED.cn_issued, cn_redeem = EXCLUDED.cn_redeem,
+    remarks = EXCLUDED.remarks, source_file = EXCLUDED.source_file, loaded_at = now()
+"""
+
+
+def build_payment_rows(dsr_rows, last_sales_date):
+    """
+    Cleaned Account DSR -> one row per date.
+
+    Rules
+      * only Uppal rows with a real date, on or before the last sales date
+        (drops "Opening Cash" lines and dates that are still in the future);
+      * only rows loaded by the current DSR loader (they carry 'Physical Day Sale'); rows from the
+        old loader have no CARD/AMEX/ZOMATO/GV and would show a wrong split;
+      * when the same date was uploaded several times, the latest upload wins;
+      * total_collected = UPI + CARD + AMEX + ZOMATO + GV + CASH. The DSR day-sale figure is kept
+        separately for reference because it can exclude cash that was paid out (for example 02-Aug).
+
+    Returns (rows, stats) where rows are tuples for PAYMENT_UPSERT_SQL.
+    """
+    stats = {"seen": 0, "old_loader": 0, "not_uppal": 0, "bad_date": 0, "future": 0, "superseded": 0}
+    best = {}
+    for r in dsr_rows:
+        stats["seen"] += 1
+        store = (str(r.get("Store Number") or "") + " " + str(r.get("Store Name") or "")).lower()
+        if "uppal" not in store and UPPAL_STORE.lower() not in store:
+            stats["not_uppal"] += 1
+            continue
+        d = parse_date(r.get("Date"))
+        if d is None:
+            stats["bad_date"] += 1
+            continue
+        if last_sales_date and d > last_sales_date:
+            stats["future"] += 1
+            continue
+        if r.get("Physical Day Sale") is None:
+            stats["old_loader"] += 1
+            continue
+        key = (str(r.get("uploaded_at") or ""), r.get("id") or 0)
+        if d in best:
+            stats["superseded"] += 1
+            if key < best[d][0]:
+                continue
+        best[d] = (key, r)
+
+    rows = []
+    for d in sorted(best):
+        r = best[d][1]
+        modes = [parse_num(r.get(c)) for c in ("UPI Amount", "Card Amount", "AMEX Amount", "Zomato Amount", "GV Amount", "Cash Amount")]
+        rows.append((
+            d, UPPAL_STORE, *modes, round(sum(modes), 2),
+            parse_num(r.get("Physical Day Sale")), parse_num(r.get("Cash Used")),
+            parse_num(r.get("CN Issued")), parse_num(r.get("CN Redeem")),
+            r.get("Remarks"), r.get("source_file_name"),
+        ))
+    return rows, stats
+
+
+def refresh_master_dashboard(conn, rows_by_date):
+    """Fill the two master-dashboard gold tables. Never blocks the main refresh."""
+    try:
+        master_rows = build_master_rows(rows_by_date)
+        cur = conn.cursor()
+        execute_values(cur, MASTER_UPSERT_SQL, master_rows, page_size=200)
+        conn.commit()
+        cur.close()
+        print(f"  [OK] gold.reebok_master_dashboard refreshed - {len(master_rows)} day(s).")
+
+        dsr = pg_fetch_all(conn, "SELECT * FROM raw.account_dsr")
+        pay_rows, st = build_payment_rows(dsr, max(rows_by_date) if rows_by_date else None)
+        if pay_rows:
+            cur = conn.cursor()
+            execute_values(cur, PAYMENT_UPSERT_SQL, pay_rows, page_size=200)
+            conn.commit()
+            cur.close()
+        print(f"  [OK] gold.reebok_master_dashboard_payments refreshed - {len(pay_rows)} day(s) "
+              f"(DSR rows seen {st['seen']}, superseded re-uploads {st['superseded']}, non-data {st['bad_date']}, "
+              f"future-dated {st['future']}).")
+        if st["old_loader"]:
+            print(f"  [WARN] {st['old_loader']} DSR row(s) were loaded by the old loader and were ignored. "
+                  "Re-upload the Account DSR file(s) to fill the payment split.")
+    except Exception as exc:  # noqa: BLE001 - keep the main refresh result intact
+        conn.rollback()
+        print(f"  [WARN] Master dashboard tables were not refreshed: {exc}")
+        print("         Has migration 2026_09_20_reebok_master_dashboard.sql been applied?")
+
+
 def refresh_reebok(verbose=True):
     print("Refreshing Uppal Reebok gold layer (R1157)...")
     conn = get_pg_conn()
@@ -556,6 +732,8 @@ def refresh_reebok(verbose=True):
     execute_values(cur, UPSERT_SQL, upserts, page_size=200)
     conn.commit()
     cur.close()
+
+    refresh_master_dashboard(conn, rows_by_date)
 
     conn.close()
     if UNMAPPED_CLASSES:
