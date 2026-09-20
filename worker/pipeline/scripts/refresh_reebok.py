@@ -164,13 +164,19 @@ EXCLUDED_CLASSES = {"carry bag"}
 # Class Name -> division. Used ONLY when the export leaves Item Division blank.
 # Built from the Aug-2026 audit; add new classes here when the warning below fires.
 CLASS_TO_DIVISION = {
-    "shoes": "footwear", "slippers": "footwear", "slider": "footwear", "sandal": "footwear",
+    "shoes": "footwear", "slippers": "footwear", "slider": "footwear", "sandal": "footwear", "slip ons": "footwear",
     "t shirt": "apparel", "polo": "apparel", "track pant": "apparel", "rb training": "apparel",
     "shorts": "apparel", "track top": "apparel", "pant": "apparel", "tank top": "apparel",
     "rb athleisure": "apparel", "tights": "apparel", "gl hoodie": "apparel", "jogger": "apparel",
     "socks": "accessories", "cap": "accessories", "bag": "accessories",
 }
 UNMAPPED_CLASSES = set()
+FALLBACK_CLASSES = set()
+
+# Safety net for a NEW class name that is not in CLASS_TO_DIVISION yet. Matches whole-word keywords
+# in the Class Name only; anything that still does not match is reported and kept out of the buckets.
+FOOTWEAR_KEYWORDS = ("shoe", "slip on", "slip-on", "slipper", "slider", "sandal", "sneaker", "flip flop", "boot")
+APPAREL_KEYWORDS = ("t shirt", "tshirt", "polo", "short", "pant", "jogger", "hood", "jacket", "track", "tight", "tank", "sweat", "tee")
 
 
 def is_excluded_line(class_name):
@@ -191,6 +197,12 @@ def resolve_division(div, class_name):
     mapped = CLASS_TO_DIVISION.get(key)
     if mapped:
         return mapped
+    if any(k in key for k in FOOTWEAR_KEYWORDS):
+        FALLBACK_CLASSES.add(f"{class_name} -> footwear")
+        return "footwear"
+    if any(k in key for k in APPAREL_KEYWORDS):
+        FALLBACK_CLASSES.add(f"{class_name} -> apparel")
+        return "apparel"
     UNMAPPED_CLASSES.add(str(class_name or "(blank)"))
     return "unclassified"
 
@@ -736,6 +748,9 @@ def refresh_reebok(verbose=True):
     refresh_master_dashboard(conn, rows_by_date)
 
     conn.close()
+    if FALLBACK_CLASSES:
+        print("\n  [INFO] Blank Item Division resolved by keyword, please add to CLASS_TO_DIVISION: "
+              + ", ".join(sorted(FALLBACK_CLASSES)))
     if UNMAPPED_CLASSES:
         print("\n  [WARN] Blank Item Division with no mapping in CLASS_TO_DIVISION (kept out of FW/APP/ACC): "
               + ", ".join(sorted(UNMAPPED_CLASSES)))
