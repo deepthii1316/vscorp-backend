@@ -118,7 +118,8 @@ def build_dimensions():
     print("Building dim_store...")
     store_df = df[
         df.get("Store Number", pd.Series()).notna() &
-        ~df.get("Store Number", pd.Series()).isin(["Total", "Grand Total"])
+        ~df.get("Store Number", pd.Series()).isin(["Total", "Grand Total"]) &
+        ~df.get("Store Number", pd.Series(dtype=str)).astype(str).str.strip().str.endswith(":")   # "Bill Value :" style labels
     ]
     store_cols = ["Store Number", "Store Name", "SAP Code", "Region", "State Name"]
     existing_cols = [c for c in store_cols if c in df.columns]

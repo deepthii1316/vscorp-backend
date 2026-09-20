@@ -154,6 +154,19 @@ def ingest_sales_file(filepath, pg_conn, uploaded_by="admin", upload_audit_id=No
     df = df[df[sn_col].notna()]
     df = df[~df[sn_col].astype(str).str.strip().eq("")]
 
+    # The SAP export ends with summary lines ("Bill Value :", "Round-Off Value :", "Total Bill Value :").
+    # They carry a label in the Store Number column but no bill, and must never become sales rows
+    # (they also used to create fake stores in staging.dim_store). Every real sales line has a Bill No.
+    bill_col = next((c for c in df.columns if c.strip().lower() == "bill no."), None)
+    rows_before = len(df)
+    df = df[~df[sn_col].astype(str).str.strip().str.endswith(":")]
+    if bill_col:
+        bill = df[bill_col].astype(str).str.strip()
+        has_bill = df[bill_col].notna() & ~bill.str.lower().isin(["", "nan", "none", "null"]) & ~bill.str.contains("total", case=False)
+        df = df[has_bill]
+    if rows_before - len(df):
+        print(f"  Skipped {rows_before - len(df)} footer/summary line(s) (no Bill No. or a 'Value :' label).")
+
     # Reformat dates
     if "Bill Date" in df.columns:
         df["Bill Date"] = pd.to_datetime(df["Bill Date"], errors="coerce")

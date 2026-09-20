@@ -624,14 +624,19 @@ def build_payment_rows(dsr_rows, last_sales_date):
         (drops "Opening Cash" lines and dates that are still in the future);
       * only rows loaded by the current DSR loader (they carry 'Physical Day Sale'); rows from the
         old loader have no CARD/AMEX/ZOMATO/GV and would show a wrong split;
-      * when the same date was uploaded several times, the latest upload wins;
+      * when the same date is in several uploads, the file whose MAIN MONTH is that date's month owns
+        the date. A monthly DSR can carry the next month's first day; that overflow row must never
+        override the real month's row, whatever order the files were uploaded in. Among files that
+        own the date (for example a corrected re-upload), the latest upload wins;
       * total_collected = UPI + CARD + AMEX + ZOMATO + GV + CASH. The DSR day-sale figure is kept
         separately for reference because it can exclude cash that was paid out (for example 02-Aug).
 
     Returns (rows, stats) where rows are tuples for PAYMENT_UPSERT_SQL.
     """
     stats = {"seen": 0, "old_loader": 0, "not_uppal": 0, "bad_date": 0, "future": 0, "superseded": 0}
-    best = {}
+
+    candidates = []          # (date, row) that passed every filter
+    month_rows = {}          # (source file, year, month) -> how many rows that file has in that month
     for r in dsr_rows:
         stats["seen"] += 1
         store = (str(r.get("Store Number") or "") + " " + str(r.get("Store Name") or "")).lower()
@@ -648,12 +653,25 @@ def build_payment_rows(dsr_rows, last_sales_date):
         if r.get("Physical Day Sale") is None:
             stats["old_loader"] += 1
             continue
-        key = (str(r.get("uploaded_at") or ""), r.get("id") or 0)
+        candidates.append((d, r))
+        key = (r.get("source_file_name"), d.year, d.month)
+        month_rows[key] = month_rows.get(key, 0) + 1
+
+    # each file's main month = the month it has the most rows in
+    main_month = {}
+    for (src, y, m), count in month_rows.items():
+        if src not in main_month or count > month_rows[(src, *main_month[src])]:
+            main_month[src] = (y, m)
+
+    best = {}
+    for d, r in candidates:
+        owns = 1 if main_month.get(r.get("source_file_name")) == (d.year, d.month) else 0
+        rank = (owns, str(r.get("uploaded_at") or ""), r.get("id") or 0)
         if d in best:
             stats["superseded"] += 1
-            if key < best[d][0]:
+            if rank < best[d][0]:
                 continue
-        best[d] = (key, r)
+        best[d] = (rank, r)
 
     rows = []
     for d in sorted(best):
