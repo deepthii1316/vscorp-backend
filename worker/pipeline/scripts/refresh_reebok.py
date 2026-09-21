@@ -7,7 +7,8 @@ every required KPI, and upserts into gold.reebok_daily_metrics.
 The gold table has one row per (full_date, period_type) where
 period_type in ('today', 'mtd', 'ytd'). This script populates ALL THREE for
 every date that has sales data, so all 4 reports can read from one table.
-YTD = calendar year (1 January of that year through the row's date).
+YTD = 1 July through the row's date (the most recent 1 July on or before it,
+so Jan-Jun dates use the previous year's 1 July).
 
 Business rules (per artifacts/docs/REEBOOK_KPI_DEFINITIONS.md):
   * NSV / RSV = SUM("Taxable Amount")
@@ -43,7 +44,7 @@ import socket
 import json
 from pathlib import Path
 from urllib.parse import urlparse
-from datetime import datetime
+from datetime import date, datetime
 from dotenv import load_dotenv
 import psycopg2
 from psycopg2.extras import execute_values
@@ -459,11 +460,18 @@ def group_rows_by_date(all_rows):
     return out
 
 
+def ytd_start(target_date):
+    """YTD starts on the most recent 1 July on or before target_date."""
+    year = target_date.year if target_date.month >= 7 else target_date.year - 1
+    return date(year, 7, 1)
+
+
 def rows_up_to_year(rows_by_date, target_date):
-    """Concat all rows where date <= target_date in the same calendar year (YTD)."""
+    """Concat all rows from the YTD start (1 July) through target_date (YTD)."""
+    start = ytd_start(target_date)
     out = []
     for d, rs in rows_by_date.items():
-        if d.year == target_date.year and d <= target_date:
+        if start <= d <= target_date:
             out.extend(rs)
     return out
 
@@ -748,7 +756,7 @@ def refresh_reebok(verbose=True):
             target_date, "mtd", today_store_name, UPPAL_STORE, *mtd_metrics.values(),
         ))
 
-        # YTD row (rows from 1 January through target_date, calendar year)
+        # YTD row (rows from 1 July through target_date; see ytd_start)
         ytd_rows = rows_up_to_year(rows_by_date, target_date)
         ytd_metrics = aggregate_one_date(ytd_rows)
         upserts.append((

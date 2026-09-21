@@ -38,7 +38,7 @@
 | FW | Footwear | Product section/category = `Footwear` | Footwear products sold. |
 | APP | Apparel | Product section/category = `Apparel` | Apparel products sold. |
 | ACC | Accessories | Product section/category = `Accessories` | Accessories products sold. |
-| YTD | Year Till Date | `From 1 January through report date` | Cumulative result for the calendar year, computed by the pipeline from raw sales (`ytd` row in `gold.reebok_daily_metrics`). Target = ₹14,00,000 × completed months since 1 Jan + current MTD target. |
+| YTD | Year Till Date | `From 1 July through report date` | Cumulative result from 1 July (the most recent 1 July on or before the report date), computed by the pipeline from raw sales (`ytd` row in `gold.reebok_daily_metrics`). Target = ₹14,00,000 × completed months since 1 July + current MTD target. |
 | MTD | Month Till Date | `From 1st of month through report date` | The cumulative result from the beginning of the month up to the report date. |
 | WTD | Week Till Date | `From start of week through report date` | Week-to-date value, if/when implemented. |
 | MD % | Markdown Percentage | `(MRP - NSV) / MRP x 100`, MRP = SUM(MRP x Qty) | How far below MRP the sales were made (decided 20-Sep-2026). Note: MRP includes GST and NSV does not, so this reads higher than a GST-inclusive comparison. |
@@ -119,7 +119,7 @@ Monthly targets in force:
 
 Example (August, 31 days): Daywise Target = 14,00,000 ÷ 31 = ₹45,161; MTD Target on 3-Aug = ₹1,35,484.
 Example (September, 30 days): Daywise Target = 8,00,000 ÷ 30 = ₹26,667; MTD Target on 17-Sep = ₹4,53,333.
-YTD Target = each completed month's own target since 1 January + the current MTD target.
+YTD Target = each completed month's own target since 1 July (the most recent 1 July on or before the report date) + the current MTD target.
 To change a month's target, edit `MONTHLY_TARGET_OVERRIDES` in `src/lib/email/reebokHelpers.js` (one line per month).
 The daywise value is not rounded in calculations (rounding is display-only) so MTD sums stay exact.
 Canonical implementation: `calcTarget`, `MTD_TARGET`, `calcAchievement` in `src/lib/email/reebokHelpers.js`.
@@ -410,3 +410,4 @@ All calculations should flow through the canonical KPI/metrics definitions so th
 | 20-Sep-2026 | Monthly target is now per month: default ₹14,00,000, September 2026 = ₹8,00,000 | Daywise, MTD and YTD targets and ACH% in the sales report, Excel and (later) the dashboard follow the month's own target |
 | 20-Sep-2026 | YTD confirmed as the calendar year, 1 January to the report date | No change to the calculation; YTD target counts every month since 1 January at its own target |
 | 21-Sep-2026 | ACH% color coding changed from fixed thresholds (80 / 60) to relative coloring (lowest red, highest green) | Sales report tables, email images and Excel |
+| 22-Sep-2026 | YTD now starts on 1 July (most recent 1 July on or before the report date), not 1 January; client decision | Pipeline `ytd` row, YTD target, footnote and Master Dashboard YTD quick range all use 1 July. Re-run refresh_reebok.py to rebuild the `ytd` rows |
