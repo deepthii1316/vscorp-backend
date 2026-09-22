@@ -251,10 +251,12 @@ def fetch_reebok_rows(conn):
         {
             "bill_date": row.get("Bill Date"),
             "bill_no": row.get("Bill No."),
+            "barcode": row.get("Bar Code"),
             "qty_raw": row.get("Qty"),
             "tax_raw": row.get("Taxable Amount"),
             "item_division": row.get("Item Division"),
             "section": row.get("Section"),
+            "department": row.get("Category"),  # "Category" column holds Department/Category from the source
             "class_name": row.get("Class Name"),
             "salesman": row.get("Salesman"),
             "mrp_raw": row.get("MRP"),

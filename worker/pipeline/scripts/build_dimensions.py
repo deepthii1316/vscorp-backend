@@ -16,6 +16,11 @@ from urllib.parse import urlparse
 from dotenv import load_dotenv
 from psycopg2.extras import execute_values
 
+try:
+    from scripts.refresh_reebok import resolve_division, FALLBACK_CLASSES, UNMAPPED_CLASSES
+except ModuleNotFoundError:
+    from refresh_reebok import resolve_division, FALLBACK_CLASSES, UNMAPPED_CLASSES
+
 script_dir = Path(__file__).resolve().parent
 pipeline_root = script_dir.parent
 
@@ -195,9 +200,14 @@ def build_dimensions():
     bc_col = "Bar Code" if "Bar Code" in df.columns else None
     if bc_col:
         prod_df = df[df[bc_col].notna()]
-        prod_cols = ["Bar Code", "Item Description", "Brand", "Section",
-                     "Category", "HSN Code", "MRP"]
+        # "Item Division" + "Class Name" feed resolve_division() (division resolution);
+        # "Category" holds Department/Category from the source, same as refresh_reebok.py.
+        prod_cols = ["Bar Code", "Item Description", "Section", "Category", "HSN Code", "MRP",
+                     "Item Division", "Class Name"]
         prod_cols = [c for c in prod_cols if c in df.columns]
+        # A barcode's Item Division / Class Name is consistent across every sales line that
+        # carries it (verified against live data 2026-09-22) — safe to take the first row per
+        # barcode, same as every other product attribute here.
         products_unique = prod_df[prod_cols].drop_duplicates(subset=[bc_col])
 
         prod_records = []
@@ -208,26 +218,47 @@ def build_dimensions():
             except (ValueError, TypeError):
                 mrp_num = None
 
+            class_name = clean_str(r.get("Class Name"))
+            # clean_str(), not r.get() directly: pandas stores a missing Item Division as
+            # float NaN here (unlike the plain-dict rows refresh_reebok.py works from), and
+            # resolve_division()'s "is this blank?" check is a bare `if div`, which is True
+            # for NaN (nan is truthy in Python) — silently misroutes every blank-division
+            # line into normalize_division('nan') -> 'accessories' instead of falling
+            # through to the Class Name lookup. Caught by comparing this table's totals
+            # against gold.reebok_daily_metrics (2026-09-22): footwear was under by 1
+            # unit / ~Rs 6,779 before this fix.
+            division = resolve_division(clean_str(r.get("Item Division")), class_name)
+            footwear_type = None
+            if division == "footwear":
+                footwear_type = "Closed" if str(class_name or "").strip().lower() == "shoes" else "Open"
+
             prod_records.append((
                 clean_str(r.get("Bar Code")),
                 clean_str(r.get("Item Description")),
                 clean_str(r.get("Item Description")),  # short_name
                 clean_str(r.get("Section"), "title"),
                 clean_str(r.get("Category"), "title"),
-                clean_str(r.get("Brand"), "title"),
+                division,
                 None, None, None, None, None,  # category_1..5, color
                 clean_str(r.get("HSN Code")),
                 mrp_num,
                 None, None,  # vendor_name, partner_name
+                class_name, footwear_type,
             ))
         print(f"  {len(prod_records)} unique products.")
+        if FALLBACK_CLASSES:
+            print("  [INFO] Blank Item Division resolved by keyword, please add to CLASS_TO_DIVISION (refresh_reebok.py): "
+                  + ", ".join(sorted(FALLBACK_CLASSES)))
+        if UNMAPPED_CLASSES:
+            print("  [WARN] Blank Item Division with no mapping (kept as 'unclassified'): "
+                  + ", ".join(sorted(UNMAPPED_CLASSES)))
         if prod_records:
             pg_truncate_and_insert(
                 conn, "staging.dim_product",
                 ["barcode", "article_name", "short_name", "section",
                  "department", "division", "category_1", "category_2",
                  "category_4", "category_5", "color", "hsn_code", "mrp",
-                 "vendor_name", "partner_name"],
+                 "vendor_name", "partner_name", "article_type", "footwear_type"],
                 prod_records
             )
 

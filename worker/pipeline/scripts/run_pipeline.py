@@ -209,6 +209,8 @@ def run_processing_run(processing_run_id):
     from build_dimensions import build_dimensions
     from refresh_gold import refresh_gold
     from refresh_reebok import refresh_reebok
+    from refresh_reebok_staging import refresh_reebok_staging
+    from refresh_category_drilldown import refresh_category_drilldown
     from refresh_stock import refresh_stock
 
     if hasattr(sys.stdout, "reconfigure"):
@@ -292,6 +294,8 @@ def run_processing_run(processing_run_id):
         ("Stage 3: staging stock facts", "facts", refresh_stock),
         ("Stage 4a: gold dashboard", "gold", refresh_gold),
         ("Stage 4b: Reebok metrics", "gold", refresh_reebok),
+        ("Stage 4c: Reebok staging", "gold", refresh_reebok_staging),
+        ("Stage 4d: Reebok category drill-down", "gold", refresh_category_drilldown),
     ):
         _set_stage(processing_run_id, stage)
         started = time.monotonic()
@@ -330,6 +334,8 @@ def run_pipeline():
     from build_dimensions import build_dimensions
     from refresh_gold import refresh_gold
     from refresh_reebok import refresh_reebok
+    from refresh_reebok_staging import refresh_reebok_staging
+    from refresh_category_drilldown import refresh_category_drilldown
     from refresh_stock import refresh_stock
 
     # Force UTF-8 on stdout for Windows
@@ -443,6 +449,15 @@ def run_pipeline():
         refresh_reebok()
     except Exception as exc:
         print(f"Reebok refresh failed: {exc}")
+        raise
+
+    # ─── Stage 3c: Refresh Reebok staging + category drill-down ─────────
+    print("\n--- Running Stage 3c: Reebok Staging + Category Drill-down ---")
+    try:
+        refresh_reebok_staging()
+        refresh_category_drilldown()
+    except Exception as exc:
+        print(f"Reebok category drill-down refresh failed: {exc}")
         raise
 
     # ─── Stage 4: Mark as completed ─────────────────────────────────────
