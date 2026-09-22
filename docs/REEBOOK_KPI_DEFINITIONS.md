@@ -35,6 +35,7 @@
 | FUPT | Footwear Per Unit Transaction | `Footwear Qty / Bills` | Average number of footwear units sold per bill. |
 | SFR | Socks to Footwear Ratio | `Socks Qty / Footwear Qty` | How many socks are bought per footwear unit. |
 | AFR | Apparel to Footwear Ratio | `Apparel Qty / Footwear Qty` | How many apparel units are sold per footwear unit. |
+| SSR | Socks to Shoes Ratio | `Socks Qty / Shoes Qty x 100` | How many socks are sold per pair of (closed) shoes — store-level, Master Dashboard only. `Shoes Qty` counts only Class Name = "Shoes" (closed footwear); open footwear (sandals, sliders) is excluded from the denominator. Shown on the Master Dashboard's Retail metrics tab only, for the All-store and Footwear divisions. Can exceed 100%. A ratio with no valid denominator (Shoes Qty = 0) is shown as a dash, never 0%.
 | FW | Footwear | Product section/category = `Footwear` | Footwear products sold. |
 | APP | Apparel | Product section/category = `Apparel` | Apparel products sold. |
 | ACC | Accessories | Product section/category = `Accessories` | Accessories products sold. |
@@ -411,3 +412,4 @@ All calculations should flow through the canonical KPI/metrics definitions so th
 | 20-Sep-2026 | YTD confirmed as the calendar year, 1 January to the report date | No change to the calculation; YTD target counts every month since 1 January at its own target |
 | 21-Sep-2026 | ACH% color coding changed from fixed thresholds (80 / 60) to relative coloring (lowest red, highest green) | Sales report tables, email images and Excel |
 | 22-Sep-2026 | YTD now starts on 1 July (most recent 1 July on or before the report date), not 1 January; client decision | Pipeline `ytd` row, YTD target, footnote and Master Dashboard YTD quick range all use 1 July. Re-run refresh_reebok.py to rebuild the `ytd` rows |
+| 22-Sep-2026 | SSR (Socks to Shoes Ratio) documented — was already computed and shown on the Master Dashboard Retail metrics tab, but missing from this doc | No calculation change; formula was already `socks_qty / shoes_qty x 100` in `src/lib/masterDashboardShared.js` |
