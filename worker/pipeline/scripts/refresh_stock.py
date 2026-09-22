@@ -67,10 +67,7 @@ def legacy_refresh_stock():
                 VALUES (%s, %s, %s, %s, %s, %s,
                     NULLIF(regexp_replace(%s, '[^0-9.-]', '', 'g'), '')::numeric)
                 ON CONFLICT (barcode) DO UPDATE SET
-                    article_name = COALESCE(EXCLUDED.article_name, staging.dim_product.article_name),
-                    section = COALESCE(EXCLUDED.section, staging.dim_product.section),
-                    department = COALESCE(EXCLUDED.department, staging.dim_product.department),
-                    division = COALESCE(EXCLUDED.division, staging.dim_product.division)
+                    article_name = COALESCE(EXCLUDED.article_name, staging.dim_product.article_name)
             """, (barcode, item, item, section, category, brand, str(mrp or "").replace(",", "")))
 
         cur.execute("TRUNCATE TABLE staging.fact_stock RESTART IDENTITY")
@@ -145,12 +142,9 @@ def refresh_stock():
             ) inventory_rows
             WHERE barcode IS NOT NULL
             ORDER BY barcode, uploaded_at DESC
-            ON CONFLICT (barcode) DO UPDATE SET
+             ON CONFLICT (barcode) DO UPDATE SET
                 article_name = COALESCE(EXCLUDED.article_name, staging.dim_product.article_name),
                 short_name = COALESCE(EXCLUDED.short_name, staging.dim_product.short_name),
-                section = COALESCE(EXCLUDED.section, staging.dim_product.section),
-                department = COALESCE(EXCLUDED.department, staging.dim_product.department),
-                division = COALESCE(EXCLUDED.division, staging.dim_product.division),
                 mrp = COALESCE(EXCLUDED.mrp, staging.dim_product.mrp)
         """)
         cur.execute("TRUNCATE TABLE staging.fact_stock RESTART IDENTITY")
