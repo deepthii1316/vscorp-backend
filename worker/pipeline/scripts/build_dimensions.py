@@ -203,7 +203,7 @@ def build_dimensions():
         # "Item Division" + "Class Name" feed resolve_division() (division resolution);
         # "Category" holds Department/Category from the source, same as refresh_reebok.py.
         prod_cols = ["Bar Code", "Item Description", "Section", "Category", "HSN Code", "MRP",
-                     "Item Division", "Class Name"]
+                     "Item Division", "Class Name", "Style Code", "Size"]
         prod_cols = [c for c in prod_cols if c in df.columns]
         # A barcode's Item Division / Class Name is consistent across every sales line that
         # carries it (verified against live data 2026-09-22) — safe to take the first row per
@@ -244,6 +244,7 @@ def build_dimensions():
                 mrp_num,
                 None, None,  # vendor_name, partner_name
                 class_name, footwear_type,
+                clean_str(r.get("Style Code")), clean_str(r.get("Size")),
             ))
         print(f"  {len(prod_records)} unique products.")
         if FALLBACK_CLASSES:
@@ -258,7 +259,8 @@ def build_dimensions():
                 ["barcode", "article_name", "short_name", "section",
                  "department", "division", "category_1", "category_2",
                  "category_4", "category_5", "color", "hsn_code", "mrp",
-                 "vendor_name", "partner_name", "article_type", "footwear_type"],
+                 "vendor_name", "partner_name", "article_type", "footwear_type",
+                 "style_code", "size"],
                 prod_records
             )
 

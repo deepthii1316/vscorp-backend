@@ -205,6 +205,7 @@ def run_processing_run(processing_run_id):
     """Process only the uploads atomically claimed for one durable run."""
     from ingest_file import (
         ingest_sales_file, ingest_account_dsr_file, ingest_inventory_file,
+        inventory_snapshot_date,
     )
     from build_dimensions import build_dimensions
     from refresh_gold import refresh_gold
@@ -221,7 +222,7 @@ def run_processing_run(processing_run_id):
         _run_function(conn, "start_processing_run", processing_run_id)
         uploads = pg_select(
             conn,
-            "SELECT id, original_file_name, report_type, storage_path "
+            "SELECT id, original_file_name, report_type, storage_path, uploaded_at "
             "FROM public.upload_audit_log "
             "WHERE processing_run_id = %s AND status = 'processing' "
             "ORDER BY uploaded_at, id",
@@ -262,7 +263,10 @@ def run_processing_run(processing_run_id):
                         )
                     elif upload["report_type"] == "inventory":
                         row_count = ingest_inventory_file(
-                            local_path, conn, upload_audit_id=upload_id
+                            local_path, conn, upload_audit_id=upload_id,
+                            stock_date=inventory_snapshot_date(
+                                upload["original_file_name"], upload["uploaded_at"]
+                            ),
                         )
                     else:
                         raise ValueError(f"Unknown report type: {upload['report_type']}")
@@ -329,7 +333,8 @@ def run_processing_run(processing_run_id):
 
 def run_pipeline():
     from ingest_file import (
-        ingest_sales_file, ingest_account_dsr_file, ingest_inventory_file
+        ingest_sales_file, ingest_account_dsr_file, ingest_inventory_file,
+        inventory_snapshot_date,
     )
     from build_dimensions import build_dimensions
     from refresh_gold import refresh_gold
@@ -359,7 +364,7 @@ def run_pipeline():
 
     pending_files = pg_select(
         conn,
-        "SELECT id, original_file_name, report_type, storage_path "
+        "SELECT id, original_file_name, report_type, storage_path, uploaded_at "
         "FROM upload_audit_log "
         "WHERE status IN ('pending', 'uploaded')"
     )
@@ -401,7 +406,10 @@ def run_pipeline():
                 elif report_type == "account_dsr":
                     row_count = ingest_account_dsr_file(local_path, conn)
                 elif report_type == "inventory":
-                    row_count = ingest_inventory_file(local_path, conn)
+                    row_count = ingest_inventory_file(
+                        local_path, conn, upload_audit_id=file_id,
+                        stock_date=inventory_snapshot_date(orig_name, f["uploaded_at"]),
+                    )
                 else:
                     raise ValueError(f"Unknown report_type: {report_type}")
 

@@ -16,7 +16,7 @@ import sys
 import io
 import pandas as pd
 import hashlib
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from pathlib import Path
 from psycopg2.extras import execute_values
@@ -354,70 +354,141 @@ def ingest_account_dsr_file(filepath, pg_conn, uploaded_by="admin", upload_audit
 
 # ── inventory ────────────────────────────────────────────────────────────────
 
-def ingest_inventory_file(filepath, pg_conn, uploaded_by="admin", upload_audit_id=None):
-    """Insert inventory rows into raw.inventory. Returns row count."""
+# raw.inventory column -> source header(s) in the "Stock Balance - Detailed" export.
+# Headers are matched EXACTLY (case/whitespace-insensitive), never by substring: substring
+# matching once stored "Style Code" in "Bar Code" (because "Style Code" was tried before "EAN")
+# and "Item Division" in "Brand" (because "division" is a substring of it), which left 0 stock
+# rows joinable to sales. "Bar Code" must be the EAN — sales "Bar Code" is the EAN too.
+INVENTORY_COLUMNS = {
+    "Store Number":       ["Store Code", "Store Number"],
+    "Store Name":         ["Store Name"],
+    "SAP Code":           ["SAPCODE", "SAP Code"],
+    "Bar Code":           ["EAN", "Bar Code", "Barcode"],
+    "Item Description":   ["Product Name", "Item Description"],
+    "Size":               ["Size"],
+    "MRP":                ["MRP"],
+    "Stock Qty":          ["Quantity", "Closing Qty", "Stock Qty"],
+    "Stock Value":        ["Total Stock With Tax"],
+    "Brand":              ["DIVISION"],
+    "Section":            ["Group Name"],
+    "Category":           ["Department"],
+    "SKU":                ["SKU"],
+    "Style Code":         ["Style Code"],
+    "Item Division":      ["Item Division"],
+    "Class Name":         ["Category"],
+    "Sub Class":          ["Subclass"],
+    "Color":              ["Color"],
+    "Gender":             ["Gender"],
+    "Last Inwarded Date": ["Last Inwarded Date"],
+    "Inward Type":        ["Inward Type"],
+    "Unit Cost":          ["Unit Cost"],
+    "Cost Value":         ["Cost Value"],
+    "MRP Value":          ["Value"],
+}
+INVENTORY_REQUIRED = ("Bar Code", "Stock Qty")
+
+
+def _norm_header(h):
+    return re.sub(r"\s+", " ", str(h)).strip().lower()
+
+
+def read_inventory_sheet(filepath):
+    """
+    Find the stock detail table in any sheet. The export has a title row above the header, and
+    from 2026-09-23 the file starts with a pivot sheet ("Row Labels" / "Sum of Quantity"), so
+    neither header row 0 nor sheet 0 can be assumed. Returns (df, sheet_name) for the first
+    sheet with a header row (within the first 10 rows) that has every required column, else
+    raises — a stock file that yields no table must fail loudly, never "complete" with 0 rows.
+    """
+    required = {r: [_norm_header(a) for a in INVENTORY_COLUMNS[r]] for r in INVENTORY_REQUIRED}
+    xl = pd.ExcelFile(filepath)
+    for sheet in xl.sheet_names:
+        head = pd.read_excel(xl, sheet_name=sheet, header=None, dtype=str, nrows=10)
+        for idx, row in head.iterrows():
+            names = {_norm_header(v) for v in row if isinstance(v, str)}
+            if all(any(a in names for a in aliases) for aliases in required.values()):
+                df = pd.read_excel(xl, sheet_name=sheet, header=idx, dtype=str)
+                df.columns = [_norm_header(c) for c in df.columns]
+                return df, sheet
+    raise ValueError(
+        f"No sheet in {os.path.basename(filepath)} has a stock table header with "
+        + " and ".join(f"one of {INVENTORY_COLUMNS[r]}" for r in INVENTORY_REQUIRED)
+        + f" (sheets: {xl.sheet_names})"
+    )
+
+
+def inventory_snapshot_date(original_file_name, uploaded_at):
+    """
+    The date a stock file describes. The export is named
+    "Stock Balance Report - 2026-09-30T224244.748.xlsx" (export time, usually late evening =
+    that day's closing stock). Older/renamed files fall back to the upload date in IST.
+    Returns 'YYYY-MM-DD'.
+    """
+    m = re.search(r"(\d{4}-\d{2}-\d{2})T\d", original_file_name or "")
+    if m:
+        return m.group(1)
+    if isinstance(uploaded_at, str):
+        uploaded_at = datetime.fromisoformat(uploaded_at)
+    if uploaded_at is None:
+        uploaded_at = datetime.now(timezone.utc)
+    if uploaded_at.tzinfo is None:
+        uploaded_at = uploaded_at.replace(tzinfo=timezone.utc)
+    return (uploaded_at.astimezone(timezone(timedelta(hours=5, minutes=30)))).strftime("%Y-%m-%d")
+
+
+def ingest_inventory_file(filepath, pg_conn, uploaded_by="admin", upload_audit_id=None, stock_date=None):
+    """Insert inventory rows into raw.inventory. Returns row count (raises if there are none)."""
     print(f"Ingesting inventory file: {os.path.basename(filepath)}")
-    df = read_excel_auto(filepath)
+    df, sheet = read_inventory_sheet(filepath)
+    stock_date = stock_date or inventory_snapshot_date(None, None)
+    print(f"  Sheet '{sheet}', {len(df)} line(s), stock date {stock_date}.")
+
+    # Excel date cells arrive as '2026-06-29 00:00:00' even under dtype=str; store ISO dates.
+    if "last inwarded date" in df.columns:
+        parsed = pd.to_datetime(df["last inwarded date"], errors="coerce")
+        df["last inwarded date"] = parsed.dt.strftime("%Y-%m-%d")
 
     now_str = datetime.now(timezone.utc).isoformat()
     renamed_name = os.path.basename(filepath)
 
-    def gv(r, keys):
-        for k in keys:
-            for col in r.index:
-                if str(col).strip().lower() == k.lower() or k.lower() in str(col).strip().lower():
-                    v = r[col]
-                    if v is not None:
-                        s = str(v).strip()
-                        if s and s.lower() not in ("nan", "none", "null", ""):
-                            return s
-        return None
+    source_col = {}
+    for target, aliases in INVENTORY_COLUMNS.items():
+        source_col[target] = next((_norm_header(a) for a in aliases if _norm_header(a) in df.columns), None)
+    missing = [t for t, c in source_col.items() if c is None]
+    if missing:
+        print(f"  [WARN] Stock file has no column for: {', '.join(missing)} (stored as NULL).")
 
-    # The stock report ends with a summary line ("Grand Total:") that carries the label in the Bar Code
+    # The stock report ends with a summary line ("Grand Total:") that carries the label in a code
     # column and the store's total quantity/value. It must never be stored as a product.
     total_label = re.compile(r"^\s*(grand\s+|sub\s*)?total\s*:?\s*$", re.IGNORECASE)
     total_lines = 0
 
+    targets = list(INVENTORY_COLUMNS)
     rows = []
     for source_row_number, (_, r) in enumerate(df.iterrows(), start=1):
-        item = gv(r, ["Product Name", "Item Description", "Description"])
-        barcode = gv(r, ["Bar Code", "Barcode", "Style Code", "EAN", "Stock No."])
-        sap = gv(r, ["SAPCODE", "SAP Code", "SAP CODE"])
-        if any(total_label.match(x or "") for x in (item, barcode, sap)):
+        vals = {t: (to_text(r[c]) if c else None) for t, c in source_col.items()}
+        if any(total_label.match(vals[k] or "") for k in ("Bar Code", "Store Number", "Item Description", "SAP Code")):
             total_lines += 1
             continue
-        if item or barcode or sap:
-            rows.append((
-                gv(r, ["Store Code", "Store Number", "Site Code", "Store"]) or "R1157",
-                gv(r, ["Store Name", "Site Name"]) or "Reebok Uppal",
-                sap,
-                barcode,
-                item,
-                gv(r, ["Size Code", "Size"]),
-                gv(r, ["MRP", "Retail Price"]),
-                gv(r, ["Closing Qty", "Total Stock Qty", "Stock Qty", "Quantity", "Qty"]) or "1",
-                gv(r, ["Total Stock With Tax", "Total Stock Out Tax", "Stock Value", "Value", "Amount"]) or "0",
-                gv(r, ["DIVISION", "Brand"]) or "Reebok",
-                gv(r, ["Group Name", "Section", "Item Division"]),
-                gv(r, ["Department", "Category", "Subclass"]),
-                now_str,
-                uploaded_by,
-                renamed_name,
-                "manual",
-                upload_audit_id,
-                source_row_number,
-            ))
+        if not vals["Bar Code"]:
+            continue
+        rows.append(tuple(vals[t] for t in targets) + (
+            stock_date,
+            now_str,
+            uploaded_by,
+            renamed_name,
+            "manual",
+            upload_audit_id,
+            source_row_number,
+        ))
 
     if total_lines:
         print(f"  Skipped {total_lines} total/summary line(s) (e.g. 'Grand Total:').")
     if not rows:
-        print("  No valid inventory records found.")
-        return 0
+        raise ValueError(f"No stock lines with an EAN found in sheet '{sheet}'.")
 
-    cols = (
-        "Store Number", "Store Name", "SAP Code", "Bar Code",
-        "Item Description", "Size", "MRP", "Stock Qty", "Stock Value",
-        "Brand", "Section", "Category",
+    cols = tuple(targets) + (
+        "Stock Date",
         "uploaded_at", "uploaded_by", "source_file_name", "ingestion_method",
         "upload_audit_id", "source_row_number"
     )
