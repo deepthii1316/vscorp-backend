@@ -10,3 +10,9 @@ worker/pipeline/data/
 .DS_Store
 Thumbs.db
 *.log
+
+# Reference docs and generated walkthroughs are local-only (keep them in E:\1drive\vs-corp\docs\)
+*walkthrough*.md
+*WALKTHROUGH*.md
+*REFERENCE*.md
+*.docx
