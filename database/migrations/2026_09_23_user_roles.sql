@@ -11,7 +11,7 @@
 --
 -- This table does NOT create login accounts. After running this migration:
 --   1. Supabase Dashboard -> Authentication -> Users -> Add user, for each
---      person (email + password), e.g. admin@thevirata.in, reebok@thevirata.in.
+--      person (email + password), e.g. admin@virata.in, reebok@virata.in.
 --   2. Run the INSERT template at the bottom of this file (edit the emails/
 --      roles/store first) to give each one a role.
 -- =============================================================
@@ -39,10 +39,10 @@ GRANT ALL ON public.users TO service_role;
 -- ─── Run AFTER creating the auth users in the Dashboard (edit emails first) ──
 -- insert into public.users (id, email, role, store_site_short_name)
 -- select id, email, 'admin', null
--- from auth.users where email = 'admin@thevirata.in'
+-- from auth.users where email = 'admin@virata.in'
 -- on conflict (id) do update set role = excluded.role, store_site_short_name = excluded.store_site_short_name;
 --
 -- insert into public.users (id, email, role, store_site_short_name)
 -- select id, email, 'store_manager', 'R1157'
--- from auth.users where email = 'reebok@thevirata.in'
+-- from auth.users where email = 'reebok@virata.in'
 -- on conflict (id) do update set role = excluded.role, store_site_short_name = excluded.store_site_short_name;
